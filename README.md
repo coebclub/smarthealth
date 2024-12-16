@@ -110,6 +110,5 @@ This section has moved to the [troubleshooting guide](https://facebook.github.io
 
 ---
 
-### Author
 Built by 
 -@omprakash447
