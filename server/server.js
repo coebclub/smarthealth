@@ -3,114 +3,360 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
 const cors = require("cors");
+
+// Initialize Express server
 const server = express();
 
 // Middleware
 server.use(express.json());
-server.use(cors({ origin: "http://localhost:3000", credentials: true }));  // CORS to allow frontend communication
+server.use(cors({ origin: "http://localhost:3000", credentials: true }));
 server.use(express.urlencoded({ extended: true }));
 
 // Session middleware
 server.use(
   session({
-    secret: "@smarthealthcare123",
+    secret: process.env.SESSION_SECRET || "@smarthealthcare123",
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: false },
+    cookie: {
+      secure: false, // Set to true for production with HTTPS
+      httpOnly: true,
+      sameSite: "strict",
+      maxAge: 1000 * 60 * 60, // 1 hour
+    },
   })
 );
 
 // MongoDB connection
 mongoose
-  .connect("mongodb://localhost:27017/SHC")
-  .then(() => {
-    console.log("Connected to MongoDB");
-  })
-  .catch((err) => {
-    console.log(err);
-  });
+  .connect(process.env.MONGO_URI || "mongodb://localhost:27017/SHC")
+  .then(() => console.log("Connected to MongoDB"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
-// Schema for authentication
+
+
+// Schema and Model definitions
+
+// authentication of user
 const AuthSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-  },
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-  },
-  password: {
-    type: String,
-    required: true,
-  },
-  userType: {
-    type: String,
-    required: true,
-  },
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  userType: { type: String, required: true },
 });
 
-// Model for authentication
 const USER = mongoose.model("User", AuthSchema);
 
-// Registration Route
+// authentication of doctor
+const DrAuthSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  specialization: { type: String, required: true },
+  contact: { type: String, required: true, unique: true },
+  experience: { type: Number, required: true },
+  currenthospital: { type: String, required: true },
+  address: { type: String, required: true }
+});
+
+const DOCTOR = new mongoose.model("Doctors", DrAuthSchema);
+
+
+
+
+// blood donate and recive schema
+const BloodSchema = new mongoose.Schema({
+  type: { type: String, required: true, enum: ["Donate", "Request"] },
+  bloodType: { type: String, required: true, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] },
+  quantity: { type: Number, required: true },
+  location: { type: String, required: true },
+  name: { type: String, required: true },
+  contact: { type: String, required: true },
+  priority: { type: String, enum: ["Low", "Medium", "High"], default: null },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Blood = mongoose.model("Blood", BloodSchema);
+
+// Routes
 server.post("/userAuth", async (req, res) => {
   const { name, email, password, userType } = req.body;
   try {
-    const userExists = await USER.findOne({ email });
-    if (userExists) {
+    if (await USER.findOne({ email })) {
       return res.status(400).json({ error: "User already exists" });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new USER({ name, email, password: hashedPassword, userType });
+    await newUser.save();
+    res.status(201).json({ message: "User registered successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+server.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await USER.findOne({ email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(404).json({ error: "Invalid credentials" });
+    }
+    req.session.user = {
+      userId: user._id,
+      userEmail: user.email,
+      userType: user.userType,
+      userName: user.name,
+    };
+    console.log("User session set:", req.session); // Debugging session
+    res.status(200).json({ message: "Login successful" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+server.get("/user", async (req, res) => {
+  try {
+    if (!req.session.user) return res.status(401).json({ error: "User not authenticated" });
+    const user = await USER.findById(req.session.user.userId).select("-password");
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.status(200).json({ userName: user.name, userId: user._id, userEmail: user.email, userType: user.userType });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// doctor registration
+server.post("/doctor-registration", async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      password,
+      specialization,
+      contact,
+      experience,
+      currentHospital, // Fix: Ensure the field matches the client-side
+      address,
+    } = req.body;
+
+    // Check for missing fields
+    if (
+      !name ||
+      !email ||
+      !password ||
+      !specialization ||
+      !contact ||
+      !experience ||
+      !currentHospital ||
+      !address
+    ) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    // Check if the doctor already exists
+    if (await DOCTOR.findOne({ email })) {
+      return res.status(400).json({ message: "Doctor already exists" });
     }
 
     // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create new user
-    const newUser = new USER({
+    // Create a new doctor record
+    const newDoctor = new DOCTOR({
       name,
       email,
       password: hashedPassword,
-      userType,
+      specialization,
+      contact,
+      experience,
+      currenthospital: currentHospital, // Fix field mapping
+      address,
     });
-    await newUser.save();
 
-    return res.status(201).json({ message: "User registered successfully" });
+    // Save the doctor to the database
+    await newDoctor.save();
+
+    // Send success response
+    res.status(201).json({ message: "Doctor registered successfully" });
   } catch (err) {
-    console.log(err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("Server Error:", err.message); // Log the error for debugging
+    res.status(500).json({ error: "Internal Server Error" }); // Use 500 for server errors
   }
 });
 
-// Login Route
-server.post("/login", async (req, res) => {
+
+
+// Doctor Login Route
+server.post("/doctor-login", async (req, res) => {
   const { email, password } = req.body;
+
   try {
-    const user = await USER.findOne({ email });
-    if (!user) {
+    // Find doctor by email
+    const doctor = await DOCTOR.findOne({ email });
+    if (!doctor) {
       return res.status(404).json({ error: "Invalid credentials" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(404).json({ error: "Invalid credentials" });
+    // Compare provided password with hashed password
+    const isPasswordValid = await bcrypt.compare(password, doctor.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // Create session for login
-    req.session.user = {
-      userId: user._id,
-      userEmail: user.email,
-      userType: user.userType,
+    // Store doctor information in session
+    req.session.doctor = {
+      id: doctor._id,
+      name: doctor.name,
+      email: doctor.email,
+      specialization: doctor.specialization,
     };
 
-    return res.status(200).json({ message: "Login successful" });
+    // Send successful login response
+    res.status(200).json({ message: "Login successful", doctor: req.session.doctor });
   } catch (err) {
-    console.log(err);
-    return res.status(500).json({ error: "Server error" });
+    console.error(err); // Log the error for debugging
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Start the server
-server.listen(2000, () => {
-  console.log("Server is running on port 2000...");
+
+
+
+
+// Blood Donation Route
+server.post("/blood/donate", async (req, res) => {
+  try {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const { bloodType, quantity, location, name, contact } = req.body;
+
+    const donationData = {
+      bloodType,
+      quantity,
+      location,
+      name: name || req.session.user.userName,  // Use the session user name if available
+      contact: contact || req.session.user.userEmail,  // Use the session user email if available
+    };
+
+    const newDonation = new Blood({ type: "Donate", ...donationData });
+    await newDonation.save();
+    res.status(201).json({ message: "Donation recorded successfully!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
+
+// Blood Request Route
+server.post("/blood/request", async (req, res) => {
+  try {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    const { bloodType, quantity, location, name, contact, priority } = req.body;
+
+    const requestData = {
+      bloodType,
+      quantity,
+      location,
+      name: name || req.session.user.userName,  // Use the session user name if available
+      contact: contact || req.session.user.userEmail,  // Use the session user email if available
+      priority,
+    };
+
+    const newRequest = new Blood({ type: "Request", ...requestData });
+    await newRequest.save();
+    res.status(201).json({ message: "Request recorded successfully!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Blood Donation Retrieval
+server.get("/blood/donations", async (_req, res) => {
+  try {
+    const donations = await Blood.find({ type: "Donate" });
+    res.status(200).json(donations);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Blood Request Retrieval
+server.get("/blood/requests", async (_req, res) => {
+  try {
+    const requests = await Blood.find({ type: "Request" });
+    res.status(200).json(requests);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Blood Match Route (to match requests with donations)
+server.get("/blood/match", async (_req, res) => {
+  try {
+    const matches = await Blood.aggregate([
+      { $match: { type: "Request" } },
+      {
+        $lookup: {
+          from: "bloods",  // Ensure this matches the collection name in MongoDB
+          let: { requestBloodType: "$bloodType", requestLocation: "$location" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$type", "Donate"] },
+                    { $eq: ["$bloodType", "$$requestBloodType"] },
+                    { $eq: ["$location", "$$requestLocation"] },
+                  ],
+                },
+              },
+            },
+          ],
+          as: "matches",
+        },
+      },
+    ]);
+    res.status(200).json(matches);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Check Availability Route
+server.post("/blood/request/check-availability", async (req, res) => {
+  try {
+    const { bloodType, quantity } = req.body;
+
+    // Find available donations for the given blood type
+    const availableDonations = await Blood.aggregate([
+      { $match: { type: "Donate", bloodType: bloodType } },
+      { $group: { _id: "$bloodType", totalQuantity: { $sum: "$quantity" } } },
+    ]);
+
+    // Check if the total available quantity is enough for the requested quantity
+    if (availableDonations.length > 0 && availableDonations[0].totalQuantity >= quantity) {
+      return res.status(200).json({ available: true, message: "Sufficient blood available" });
+    } else {
+      return res.status(200).json({ available: false, message: "Insufficient blood available" });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Start server
+server.listen(2000, () => console.log("Server is running on port 2000"));
